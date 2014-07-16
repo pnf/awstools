@@ -4,6 +4,8 @@
 pom.xml
 pom.xml.asc
 *.jar
+AWS*
+*~
 *.class
 /.lein-*
 /.nrepl-port
