@@ -1,7 +1,6 @@
-(ns awstools.core
+(ns acycic.awstools.core
   (:use [amazonica.core]
-        [amazonica.aws.ec2]
-        )
+        [amazonica.aws.ec2])
   (:require [clj-ssh.ssh :as ssh]
             [ clojure.core.async :as async 
              :refer [<! >! <!! >!! timeout chan alt!! go close!]]))
