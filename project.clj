@@ -1,4 +1,4 @@
-(defproject com.acyclic.awstools "0.1.0-SNAPSHOT"
+(defproject acyclic/awstools "0.1.0-SNAPSHOT"
   :author "Peter Fraenkel <http://podsnap.com>"
   :description "Simple tools for controlling EC2 using core.async"
   :url "http://github.com/pnf/awstools"
