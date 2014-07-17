@@ -1,4 +1,4 @@
-(ns acycic.awstools.core
+(ns acyclic.awstools.core
   (:use [amazonica.core]
         [amazonica.aws.ec2])
   (:require [clj-ssh.ssh :as ssh]
