@@ -7,6 +7,7 @@
   :dependencies [[org.clojure/clojure "1.6.0"]
                  [clj-time "0.7.0"]
                  [amazonica "0.2.16"]
+                 [acyclic/utils "0.1.0-SNAPSHOT"]
                  [clj-ssh "0.5.10"]
                  [org.clojure/core.async "0.1.303.0-886421-alpha"]
                  [com.taoensso/timbre "3.2.0"] 
