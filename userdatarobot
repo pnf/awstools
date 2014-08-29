@@ -1,0 +1,43 @@
+#! /bin/sh
+# Basic support for IRIX style chkconfig
+###
+# chkconfig: 235 98 55
+# description: Manages the services you are controlling with the chkconfig command
+###
+
+. /etc/init.d/functions
+
+
+# Place in 
+# chmod +x /etc/init.d/userdatarobot
+# /sbin/chkconfig userdatarobot on
+# Requires existence of proper robot.sh script
+
+
+USER=ec2-user
+DIR=/home/${USER}
+CMD=${DIR}/robot.sh
+PIDFILE=${DIR}/ROBOPID
+
+case "$1" in
+  start)
+        echo -n "Starting ${CMD} as ${USER}"
+	
+	daemon --user=${USER} --pidfile=${PIDFILE} ${CMD} &>/dev/null &
+
+        echo "."
+        ;;
+  stop)
+        echo -n "Stopping new-service"
+
+	killproc -p ${PIDFILE} ${CMD}
+
+        echo "."
+        ;;
+
+  *)
+        echo "Usage: /sbin/service new-service {start|stop}"
+        exit 1
+esac
+
+exit 0
