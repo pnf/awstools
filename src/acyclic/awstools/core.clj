@@ -4,20 +4,28 @@
         acyclic.utils.pinhole)
   (:require [clj-ssh.ssh :as ssh]
             [taoensso.timbre :as timbre]
-            [ clojure.core.async :as async 
+            [clojure.data.codec.base64 :as b64]
+            [clojure.core.async :as async 
              :refer [<! >! <!! >!! timeout chan alt!! go close!]]))
 (timbre/refer-timbre)
+
+; ami-5cd51634
+
+
 
 (def cred (read-string (slurp "AWS.clj")))
 
 (apply defcredential (map cred [:access-key :secret-key :endpoint]))
 
+(defn s->b64 [s] (String. (b64/encode (.getBytes s))))
 
 
 (def ^{:private true} paths {:zone  [:launch-specification :placement :availability-zone]
-                             :itype  [:launch-specification :instance-type]
+                             :itype [:launch-specification :instance-type]
                              :price [:spot-price]
-                             :n     [:instance-count]})
+                             :n     [:instance-count]
+                             :udata [s->b64 :launch-specification :user-data]})
+
 
 (defmacro go-try [& forms]
   `(go (try (do ~@forms)
@@ -33,6 +41,7 @@ Returns result of genfn, or nil in the case of timeout."
     (async/go-loop []
       (let [rc     (go-try (genfn))
             [v c]  (async/alts! [rc t1 out])]
+        (debug "Ats:" v c)
         (cond
          (= c out)                    (do (debug "Canceled")
                                           (when failure (failure)))
@@ -43,6 +52,7 @@ Returns result of genfn, or nil in the case of timeout."
                                           (>! out v))
          :else                        (do (debug "Still" v "Waiting" time-wait)
                                           (<! (timeout (* 1000 time-wait)))
+                                          (debug "Woke up after wait...")
                                           (recur)))))
     out))
 
@@ -97,8 +107,8 @@ Returns result of genfn, or nil in the case of timeout."
 
 (defn- give-up-and-cancel [req & [msg]]
   (when msg (debug msg))
-  (some-> req :is terminate)
-  (some-> req :rs cancel))
+  (concat  (some-> req :is terminate)
+           (some-> req :rs cancel)))
 
 (defn request-spots [req]
   (let [args    (apply concat (seq req))
@@ -146,9 +156,24 @@ Returns result of genfn, or nil in the case of timeout."
 
 (def ag (ssh/ssh-agent {}))
 
+(defn ssh-session [host]
+  (let [sess (ssh/session ag host {:strict-host-key-checking :no
+                                   :username "ec2-user"})]
+    (<!! (async/go-loop [n 10]
+           (cond
+            (ssh/connected? sess) sess
+            (zero? n) (do (debug "Failed to connect to" host) nil)
+            :else     (do
+                        (ssh/connect sess)
+                        (if (ssh/connected? sess)
+                          sess
+                          (do
+                            (<! (timeout 1000))
+                            (recur (dec n))))))))))
+
+
 (defn ssh-sessions [hosts]
-  (let [sess (map #(ssh/session ag % {:strict-host-key-checking :no
-                                      :username "ec2-user"})
+  (let [sess (map #()
                   hosts)]
     (loop [n 10]
            (let [o (map #(or (ssh/connected? %) (ssh/connect %)) sess)]
@@ -167,10 +192,10 @@ Returns result of genfn, or nil in the case of timeout."
                   (:hosts req))]
     (patience
      (fn [] (let [sbad (filter #(not (ssh/connected? %)) sess)]
-               (doseq [s sbad] (ssh/connect s))
-               (assoc req :sessions sess)))
+              (doseq [s sbad] (ssh/connect s))
+              (assoc req :sessions sess)))
      #(every? ssh/connected? (:sessions %1))
-     #(give-up-and-cancel req "Failed to add sesions")
+     nil ;#(give-up-and-cancel req "Failed to add sesions")
      60 10
      )))
 
@@ -181,12 +206,14 @@ to each cfn in order.  Returns a channel that will contain the result of the fin
 cfn or nil, if one of them failed along the way."
   [x & cfns]
   (let [out (chan)]
+    (debug "Starting" cfns)
     (async/go-loop [[f & fs] cfns
                     x        x]
       (if-not f
         (do (debug "Finished" cfns)
             (>! out x))
-        (let [y (<! (f x))]
+        (let [_ (debug "Invoking" f x)
+              y (<! (f x))]
           (if-not y
             (do (debug "Failed at" f)
                 (close! out))
@@ -202,9 +229,11 @@ Returns a channel that will contain a map of :hosts, :sessions, etc or nil."
   (let [req (apply ph-assoc reqmap paths opts)
         req (assoc req :nmin nmin)
         n    (ph-get reqmap paths :n)
-        req (if (<= nmin n) req (ph-assoc reqmap paths :n nmin))]
-    (chain-some {:req req} add-requests add-instances add-ips  add-sessions)))
-
+        req (if (<= nmin n) req (ph-assoc req paths :n nmin))]
+    (debug "Bringing up" req)
+    (chain-some {:req req} add-requests add-instances add-ips add-hosts)
+    ))
+;; add-sessions
 
 (defn EDNify
 "EDN-ify an arbitrary object, leaving it alone if it's an innocuous string."
@@ -293,7 +322,6 @@ ssh-exec, yielding a map of :exit code, :out string and :err string."
                  :subnet-id                  (get my-subnets zone)
                  :iam-instance-profile       {:arn "arn:aws:iam::633840533036:instance-profile/girder-peer"}}]
         (apply request-spot-instances req)]
-    (println req)
     (map :spot-instance-request-id  (:spot-instance-requests r))))
 
 #_(defn patience
@@ -307,7 +335,7 @@ Returns result of genfn, or nil in the case of timeout."
             p   (pred r)]
         (if p
          (do (debug "Returning" r)
-              (>! out r) (close! r))
+              (>! out r) (close! out))
          (let [t2     (timeout (* 1000  time-wait))
                _      (debug "Still" r "Waiting" time-wait "sec")
                [v c] (async/alts! [t1 t2])]
