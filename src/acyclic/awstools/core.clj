@@ -16,16 +16,17 @@
 
 
 (def cred (read-string (slurp "AWS.clj")))
-
 (apply defcredential (map cred [:access-key :secret-key :endpoint]))
 
 (defn s->b64 [s] (String. (b64/encode (.getBytes s))))
-
 (defn b64->s [s] (String. (b64/decode (.getBytes s))))
-
 (defn- m->pair [[_ k v]] [(keyword k) v])
-
-(defn b64->ec2-data [s]
+(defn b64->ec2-data
+  "Given a base-64 encoded message of the form
+     field1: some data
+     field2: some other data
+return a map of the form {:field1 \"some data\" :field2: \"some other data}."
+  [s]
   (let [xs  (-> s b64->s clojure.string/split-lines)
         es  (map #(->> % 
                        (re-matches #"^([\w\-]+):\s*(.*)")
@@ -33,7 +34,9 @@
     (into {} es)))
 
 (defn chan->seq
-  "Drains a channel onto a lazy sequence.  Blocks internally."
+  "Drains a channel onto a lazy sequence.  If the optional terminate?
+argument is true, it will return immediately with whatever is currently
+available on the channel; otherwise it will block until data is available."
   [c & [terminate?]]
   (lazy-seq
    (when-let [v (if terminate?
@@ -42,14 +45,6 @@
      (cons v (chan->seq c terminate?)))))
 
 
-(def ^{:private true} paths {:zone  [:launch-specification :placement :availability-zone]
-                             :itype [:launch-specification :instance-type]
-                             :subnet [:launch-specification :instance-network-interface-specification 0 :subnet-id]
-                             :group [:launch-specification :network-interfaces 0 :groups 0]
-                             :public? [:launch-specification :network-interfaces 0 :associate-public-ip-address]
-                             :price [:spot-price]
-                             :n     [:instance-count]
-                             :udata [s->b64 :launch-specification :user-data]})
 
 
 (def my-ec2-info nil)
@@ -67,6 +62,48 @@
   nil
   )
 
+(comment  ;; typical contents of the ec2 data file
+{
+ :sqs-url "https://sqs.us-east-1.amazonaws.com/633840533036/instance-status"
+ :sns-topic "arn:aws:sns:us-east-1:633840533036:instance-up"
+ :region "us-east-1"
+ :vpc "vpc-e2299f87"
+ :subnet-public "subnet-7482935c"
+ :subnet-private "subnet-7382935b"
+ :route-table-public "rtb-68c0770d"
+ :route-table-private "rtb-6ec0770b"
+ :nat-id "i-8a0e1565"
+ :template-id "i-7c949193"
+ :req {:spot-price 0.01, 
+                :instance-count 1, 
+                :type "one-time", 
+                :launch-specification  {:image-id "ami-ec70d384",
+                                        :instance-type "t1.micro",
+                                        :placement  {:availability-zone "us-east-1a"},
+                                        :key-name "telekhine",
+                                        :network-interfaces          
+                                        [{:device-index 0
+                                          :subnet-id "subnet-7482935c"
+                                          ;;:associate-public-ip-address true
+                                          :groups ["sg-f8fea59d"]}]
+                                        :iam-instance-profile {:arn "arn:aws:iam::633840533036:instance-profile/girder-peer"}}}
+ :subnets {"us-east-1a"  "subnet-7482935c"}
+}
+
+)
+
+
+;; Pinhole paths into ec2 request map:
+(def ^{:private true} paths
+  {:zone    [:launch-specification :placement :availability-zone]
+   :itype   [:launch-specification :instance-type]
+   :subnet  [:launch-specification :instance-network-interface-specification 0 :subnet-id]
+   :group   [:launch-specification :network-interfaces 0 :groups 0]
+   :public? [:launch-specification :network-interfaces 0 :associate-public-ip-address]
+   :price   [:spot-price]
+   :n       [:instance-count]
+   :udata   [s->b64 :launch-specification :user-data]})
+
 
 (defn cmd-timeout [sec cmd & args]
   (let [cc (go (apply cmd args))
@@ -76,10 +113,10 @@
       (do (debug "cmd" args "timed out after" sec) nil))))
 
 (defn sqs-listen
-  "Listen on an SQS queue, sending messages to a channel, which is returned."
+  "Listen on an SQS queue, forwarding  messages to a channel, which is returned."
  [& [url]]
   (let [url (or url my-sqs-url)
-        c   (chan)]
+        c   (chan 100)]
     (async/go-loop []
       (if (pimpl/closed? c)
         (debug "Shutting down sqs-listen" url)
@@ -95,16 +132,6 @@
           (recur))))
     c))
 
-(defmacro go-try [& forms]
-  `(go (try (do ~@forms)
-            (catch Exception e#
-              (do (debug "Caught exception" e#) nil)))))
-
-(defn request-status [rs]
-  (let [d    (cmd-timeout 5 describe-spot-instance-requests :spot-instance-request-ids rs)
-        sirs (:spot-instance-requests d)
-        _    (debug "Request statuses" rs d sirs)]
-    (map :state sirs)))
 
 (defn instance-info-map
   "Returns map of instance-id to map of information about instance."
@@ -118,7 +145,11 @@
                        [:host [:public-dns-name #(when (seq %) %)]]])) ims)]
     (mseq->m xms :instance-id)))
 
-(defn request-info-map [ids]
+(defn request-info-map
+  "Returns a map of request-id to map of request-id to a map of information
+about the request.  If an instance-id is available, the instance-info-map data
+will be merged in."
+  [ids]
   (let [descs  (describe-spot-instance-requests :spot-instance-request-ids ids)
         sirs   (:spot-instance-requests descs)
         sirs   (map (fn [rm] (m-section rm [[:request-id :spot-instance-request-id] :state :instance-id])) sirs)
@@ -155,7 +186,9 @@
     t))
 
 
-(defn cancel-requests [rs]
+(defn cancel-requests
+  "Cancel the specified requests; if instance-id information is available, also stops the instances."
+  [rs]
   (let [ds (:spot-instance-requests (describe-spot-instance-requests :spot-instance-request-ids rs))
         is (filter (complement nil?) (map :instance-id ds))
         cr (:cancelled-spot-instance-requests (cancel-spot-instance-requests :spot-instance-request-ids rs))
@@ -165,7 +198,10 @@
 
 (def ids->chs (atom {}))
 
-(defn notify-chan [id]
+(defn- notify-chan
+  "Return a channel that will receive status information extracted from send-up messages
+with the specified id.  See b64->ec2-data."
+  [id]
   (let [c (chan)]
     (swap! ids->chs assoc id c)
     c))
@@ -196,24 +232,21 @@
     ctl))
 
 
-;;aws --region us-east-1 sns publish --topic-arn  arn:aws:sns:us-east-1:633840533036:instance-up --message yowsassl
-
-(defn send-up [id & {topic :topic region :region}]
+(defn send-up
+  "Creates an aws command to send a coded SNS message indicating that the instance is up.
+The message incorporates the id argument as well as some fields from the ec2-metadata utility
+and resembles the base 64 encoding of:
+    id: 50b190c0-67d5-407d-aa48-b031c11a4521
+    instance-id: i-a0d5204e
+    public-hostname: ec2-54-85-255-39.compute-1.amazonaws.com
+    cal-ipv4: 10.0.49.210
+See b64->ec2-data."
+  [id & {topic :topic region :region}]
   (str
    "aws --region " (or region my-region)
    " sns publish --topic-arn " (or topic my-sns-topic)
    " --message `(echo \"id: " id "\";bin/ec2-metadata -i -p -o) | base64 -w 0`"
    "\n"))
-
-;(stop-instances :instance-ids ["i-7c949193"])
-;(modify-instance-attribute :instance-id "i-7c949193" :user-data (s->b64 "echo hello"))
-
-(defn good-strings [vs]
-  (and (sequential?  vs)
-       (every? string? vs)
-       (every? pos? (map count vs))))
-
-
 
 (defn- really-up? [rs->info rs]
   (let [info (get rs->info rs)]
@@ -222,7 +255,11 @@
      (string? (:ip info))
      (pos? (count (:ip info))))))
 
-(defn bring-up-spots  [reqmap nmin cmds & opts]
+(defn bring-up-spots
+  "Bring up at least nmin instances as specified by reqmap.  The sequence
+of cmds will be excecuted at startup.  Any other request-spot-instance arguments
+can be specified optionally."
+  [reqmap nmin cmds & opts]
   (let [id  (.toString (UUID/randomUUID))
         cmd (str (send-up id) (clojure.string/join "\n" cmds) "\n")
         req (apply ph-assoc reqmap paths opts)
