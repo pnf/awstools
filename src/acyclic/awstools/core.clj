@@ -248,6 +248,16 @@ See b64->ec2-data."
    " --message `(echo \"id: " id "\";bin/ec2-metadata -i -p -o) | base64 -w 0`"
    "\n"))
 
+;(stop-instances :instance-ids ["i-7c949193"])
+;(modify-instance-attribute :instance-id "i-7c949193" :user-data (s->b64 "echo hello"))
+
+(defn good-strings [vs]
+  (and (sequential?  vs)
+       (every? string? vs)
+       (every? pos? (map count vs))))
+
+
+
 (defn- really-up? [rs->info rs]
   (let [info (get rs->info rs)]
     (and
