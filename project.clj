@@ -8,6 +8,7 @@
                  [org.clojure/data.codec "0.1.0"]
                  [clj-time "0.7.0"]
                  [amazonica "0.2.16"]
+                 [org.clojure/data.json "0.2.5"]
                  [acyclic/utils "0.1.0-SNAPSHOT"]
                  [clj-ssh "0.5.10"]
                  [org.clojure/core.async "0.1.338.0-5c5012-alpha"]
