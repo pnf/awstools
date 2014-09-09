@@ -22,21 +22,17 @@ PIDFILE=${DIR}/ROBOPID
 case "$1" in
   start)
         echo -n "Starting ${CMD} as ${USER}"
-	
 	daemon --user=${USER} --pidfile=${PIDFILE} ${CMD} &>/dev/null &
-
         echo "."
         ;;
   stop)
-        echo -n "Stopping new-service"
-
+        echo -n "Stopping ${CMD}"
 	killproc -p ${PIDFILE} ${CMD}
-
         echo "."
         ;;
 
   *)
-        echo "Usage: /sbin/service new-service {start|stop}"
+        echo "Usage: /sbin/service userdatarobot {start|stop}"
         exit 1
 esac
 
