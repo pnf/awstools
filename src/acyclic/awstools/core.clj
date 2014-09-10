@@ -15,6 +15,10 @@
 (timbre/refer-timbre)
 
 
+(defonce all-normal-instances (atom #{}))
+(defonce all-requests (atom #{}))
+
+
 (def cred (read-string (slurp "AWS.clj")))
 (apply defcredential (map cred [:access-key :secret-key :endpoint]))
 
@@ -45,20 +49,23 @@ available on the channel; otherwise it will block until data is available."
      (cons v (chan->seq c terminate?)))))
 
 
-
-
 (def my-ec2-info nil)
 (def my-req nil)
 (def my-sns-topic nil)
 (def my-sqs-url nil)
 (def my-region "us-east-1")
+(def my-sub-public)
+(def my-sub-private)
 (defn slurp-ec2-info [f]
   (let [i (read-string (slurp f))]
     (alter-var-root (var acyclic.awstools.core/my-ec2-info) #(do % i))
     (alter-var-root (var acyclic.awstools.core/my-req) #(do % (:req i)))
     (alter-var-root (var acyclic.awstools.core/my-region) #(do % (:region i)))
     (alter-var-root (var acyclic.awstools.core/my-sns-topic) #(do % (:sns-topic i)))
-    (alter-var-root (var acyclic.awstools.core/my-sqs-url) #(do % (:sqs-url i))))
+    (alter-var-root (var acyclic.awstools.core/my-sqs-url) #(do % (:sqs-url i)))
+    (alter-var-root (var acyclic.awstools.core/my-sqs-url) #(do % (:sqs-url i)))
+    (alter-var-root (var acyclic.awstools.core/my-sub-private) #(do % (:subnet-private i)))
+    (alter-var-root (var acyclic.awstools.core/my-sub-public) #(do % (:subnet-public i))))
   nil
   )
 
@@ -97,11 +104,12 @@ available on the channel; otherwise it will block until data is available."
 (def ^{:private true} paths
   {:zone    [:launch-specification :placement :availability-zone]
    :itype   [:launch-specification :instance-type]
-   :subnet  [:launch-specification :instance-network-interface-specification 0 :subnet-id]
+   :subnet  [:launch-specification :network-interfaces 0 :subnet-id]
    :group   [:launch-specification :network-interfaces 0 :groups 0]
    :public? [:launch-specification :network-interfaces 0 :associate-public-ip-address]
    :price   [:spot-price]
    :n       [:instance-count]
+   :key     [:launch-specification :key-name]
    :udata   [s->b64 :launch-specification :user-data]})
 
 
@@ -136,7 +144,8 @@ available on the channel; otherwise it will block until data is available."
 (defn instance-info-map
   "Returns map of instance-id to map of information about instance."
   [is]
-  (let [res   (:reservations (describe-instances :instance-ids is))
+  (let [is    (vec is)
+        res   (:reservations (describe-instances :instance-ids is))
         ims   (map #(get-in % [:instances 0]) res)
         xms   (map (fn [im] (m-section im
                       [:instance-id
@@ -150,53 +159,65 @@ available on the channel; otherwise it will block until data is available."
 about the request.  If an instance-id is available, the instance-info-map data
 will be merged in."
   [ids]
-  (let [descs  (describe-spot-instance-requests :spot-instance-request-ids ids)
-        sirs   (:spot-instance-requests descs)
-        sirs   (map (fn [rm] (m-section rm [[:request-id :spot-instance-request-id] :state :instance-id])) sirs)
-        is     (filter string? (map :instance-id sirs))
-        ims    (instance-info-map is)
-        sirs   (map #(merge % (ims (:instance-id %))) sirs)]
-    (mseq->m sirs :request-id)))
+  (if-not (seq ids)
+    {}
+    (let [ids    (vec ids)
+          descs  (describe-spot-instance-requests :spot-instance-request-ids ids)
+          sirs   (:spot-instance-requests descs)
+          sirs   (map (fn [rm] (m-section rm [[:request-id :spot-instance-request-id] :state :instance-id])) sirs)
+          is     (filter string? (map :instance-id sirs))
+          ims    (instance-info-map is)
+          sirs   (map #(merge % (ims (:instance-id %))) sirs)]
+      (mseq->m sirs :request-id))))
 
-
-(defn request-instances [rs]
-  (let [d (describe-spot-instance-requests :spot-instance-request-ids rs)]
-    (map :instance-id (:spot-instance-requests d))))
 
 (defn request-spots [req & opts]
   (let [req    (apply ph-assoc req paths opts)
         args   (apply concat (seq req))
         _      (debug "Spot request" (pr-str args))
-        rs     (apply request-spot-instances args)]
-    (map :spot-instance-request-id  (:spot-instance-requests rs))))
+        rs     (apply request-spot-instances args)
+        rs     (map :spot-instance-request-id  (:spot-instance-requests rs))]
+    (debug "Requests:" (pr-str (vec rs)))
+    (swap! all-requests #(apply conj % rs))
+    rs))
 
 (defn terminate [is]
-  (let [t (terminate-instances :instance-ids is)]
-    (debug t)
-    t))
+  (when (seq is)
+    (let [is (vec is)
+          t (terminate-instances :instance-ids is)]
+      (debug t)
+      t)))
 
 (defn stop [is]
-  (let [t (stop-instances :instance-ids is)]
-    (debug t)
-    t))
+  (when (seq is)
+    (let [is (vec is)
+          t  (stop-instances :instance-ids is)]
+      (swap! all-normal-instances #(apply disj % is))
+      (debug t)
+      t)))
 
 (defn start [is]
-  (let [t (start-instances :instance-ids is)]
-    (debug t)
-    t))
+  (when (seq is)
+    (let [is (vec is)
+          t (start-instances :instance-ids is)]
+      (swap! all-normal-instances #(apply conj % is))
+      (debug t)
+      t)))
 
 
 (defn cancel-requests
   "Cancel the specified requests; if instance-id information is available, also stops the instances."
   [rs]
-  (let [ds (:spot-instance-requests (describe-spot-instance-requests :spot-instance-request-ids rs))
-        is (filter (complement nil?) (map :instance-id ds))
-        cr (:cancelled-spot-instance-requests (cancel-spot-instance-requests :spot-instance-request-ids rs))
-        ci (and (seq is) (terminate is))]
-    [cr ci]))
+  (when (seq rs)
+    (let [rs (vec rs)
+          cr (:cancelled-spot-instance-requests (cancel-spot-instance-requests :spot-instance-request-ids rs))
+          ds (:spot-instance-requests (describe-spot-instance-requests :spot-instance-request-ids rs))
+          is (filter (complement nil?) (map :instance-id ds))
+          ci (and (seq is) (terminate is))]
+      (swap! all-requests #(apply disj % rs))
+      [cr ci])))
 
-
-(def ids->chs (atom {}))
+(defonce ids->chs (atom {}))
 
 (defn- notify-chan
   "Return a channel that will receive status information extracted from send-up messages
@@ -256,8 +277,6 @@ See b64->ec2-data."
        (every? string? vs)
        (every? pos? (map count vs))))
 
-
-
 (defn- really-up? [rs->info rs]
   (let [info (get rs->info rs)]
     (and
@@ -265,44 +284,54 @@ See b64->ec2-data."
      (string? (:ip info))
      (pos? (count (:ip info))))))
 
+
 (defn bring-up-spots
   "Bring up at least nmin instances as specified by reqmap.  The sequence
 of cmds will be excecuted at startup.  Any other request-spot-instance arguments
 can be specified optionally."
   [reqmap nmin cmds & opts]
-  (let [id  (.toString (UUID/randomUUID))
+  (let [[opts [tot no-cancel?]] (extract-opts opts [:minutes :no-cancel])
+        _  (debug opts tot no-cancel?)
+        tot (or tot 5)
+        id  (.toString (UUID/randomUUID))
         cmd (str (send-up id) (clojure.string/join "\n" cmds) "\n")
         req (apply ph-assoc reqmap paths opts)
         req (ph-assoc req paths :udata cmd)
         n   (ph-get reqmap paths :n)
         req (if (<= nmin n) req (ph-assoc req paths :n nmin))
-        _   (debug "Requesting:" id req)
+        _   (debug "Requesting:" id (pr-str req))
         cl  (notify-chan id)
         rs  (request-spots req)
-        to  (timeout (* 5 60 1000))]
-    (debug "Spot requests:" rs)
+        to  (timeout (* tot 60 1000))]
     (async/go-loop [i 0]
       (if (>= i nmin)
-        (let [rs->info (request-info-map rs)
+        (let [_ (debug 1)
+              rs->info (request-info-map rs)
+              _ (debug rs->info)
               pred     (partial really-up? rs->info)
               rs-up    (filter pred rs)
+              _ (debug rs-up)
               rs-dn    (filter (complement pred) rs)]
+          (debug "Brought up" i "spots: "(pr-str [rs-up rs-dn rs->info]))
           (close-notify-chan! id)
           (cancel-requests rs-dn)
-          (map rs->info rs-up))
+          (m-section rs->info rs-up))
         (let [[v c] (async/alts! [cl to])]
           (cond
-           (= c to) (do (info "Timeout on spot request:" req)
+           (= c to) (when (not  no-cancel?)
+                      (info "Timeout on spot request:" req)
                       (close-notify-chan! id)
                       (cancel-requests rs)
                       nil)
            (= c cl) (recur (inc i))))))))
 
-(defn bring-up-instances [is]
-  (let [n  (count is)
+(defn bring-up-instances [is & opts]
+  (let [[_ [tot no-cancel?]] (extract-opts opts [:minutes :no-cancel])
+        tot (or tot 5)
+        n  (count is)
         id (.toString (UUID/randomUUID))
         cl (notify-chan id)
-        to (timeout (* 5 60 1000))]
+        to (timeout (* tot 5 60 1000))]
     (doseq [i is]
             (modify-instance-attribute :instance-id i :user-data (s->b64 (send-up id))))
     (start is)
@@ -311,11 +340,12 @@ can be specified optionally."
         (instance-info-map is)
         (let [[v c] (async/alts! [cl to])]
           (cond
-           (= c to) (do (info "Timeout on instance request:" is)
+           (= c to) (do (when (not no-cancel?) "Timeout on instance request:" is)
                         (close-notify-chan! id)
                         (stop is)
                         nil)
-           (= c cl) (recur (dec i))))))))
+           (= c cl) (do (debug "Received" v)
+                        (recur (dec i)))))))))
 
 
 (def ag (ssh/ssh-agent {}))
@@ -384,5 +414,32 @@ ssh-exec, yielding a map of :exit code, :out string and :err string."
           (>! c req) (close! c)))
     c))
 
+
+(defn clean-up-volumes []
+  (let [vols (:volumes (describe-volumes))
+        bad  (filter #(-> % :attachments seq not) vols)
+        ids  (map :volume-id bad)]
+    (when (seq ids)
+      (info "Deleting volumes:" ids)
+      (doseq [v ids]
+        (delete-volume :volume-id v)))))
+
+(defn clean-up []
+  (let [rs   (seq @all-requests)
+        is   (seq @all-normal-instances)]
+    (when (seq rs)
+      (info "Canceling/terminating:" rs)
+      (cancel-requests rs)
+      (reset! all-requests #{}))
+    (when (seq is)
+      (info "Stopping:" is)
+      (stop is)
+      (reset! all-normal-instances #{}))
+    (Thread/sleep 1000)
+    (clean-up-volumes)
+    (when-let [c (:sqs-listen @ids->chs)]
+      (info "Bringing down listener" c)
+      (close! c))
+    (reset! ids->chs {})))
 
 
