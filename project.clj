@@ -7,14 +7,14 @@
   :dependencies [[org.clojure/clojure "1.6.0"]
                  [org.clojure/data.codec "0.1.0"]
                  [clj-time "0.7.0"]
-                 [amazonica "0.2.16"]
+                 [amazonica "0.2.25"]
                  [org.clojure/data.json "0.2.5"]
                  [acyclic/utils "0.1.0-SNAPSHOT"]
                  [clj-ssh "0.5.10"]
                  [org.clojure/core.async "0.1.338.0-5c5012-alpha"]
                  ;[org.clojure/core.async "0.1.303.0-886421-alpha"]
-                 [com.taoensso/timbre "3.2.0"] 
-                 [com.taoensso/carmine "2.7.0-RC1"]])
+                 [com.taoensso/timbre "3.3.1"] 
+                 [com.taoensso/carmine "2.7.0"]])
 
 
 
