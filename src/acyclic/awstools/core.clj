@@ -292,7 +292,7 @@ can be specified optionally."
   [reqmap nmin cmds & opts]
   (let [[opts [tot no-cancel?]] (extract-opts opts [:minutes :no-cancel])
         _  (debug opts tot no-cancel?)
-        tot (or tot 5)
+        tot (or tot 10)
         id  (.toString (UUID/randomUUID))
         cmd (str (send-up id) (clojure.string/join "\n" cmds) "\n")
         req (apply ph-assoc reqmap paths opts)
